@@ -1,13 +1,18 @@
 require("dotenv").config();
 
-const { Client, GatewayIntentBits } = require("discord.js");
+const {
+  Client,
+  EmbedBuilder,
+  Events,
+  GatewayIntentBits,
+} = require("discord.js");
 
 function envValue(name, { optional = false } = {}) {
   const value = process.env[name]?.trim();
 
   if (!value || value.startsWith("paste_")) {
     if (optional) return null;
-    throw new Error(`Set ${name} in your .env file.`);
+    throw new Error(`Set ${name} in your environment variables.`);
   }
 
   return value;
@@ -26,122 +31,94 @@ const client = new Client({
   ],
 });
 
-function collectComponentUrls(components) {
-  const urls = [];
+function copyEmbed(embed) {
+  const copy = new EmbedBuilder();
+  let hasContent = false;
 
-  for (const row of components ?? []) {
-    for (const component of row.components ?? []) {
-      if (component.url) urls.push(component.url);
-    }
+  if (embed.color !== null) copy.setColor(embed.color);
+  if (embed.title) {
+    copy.setTitle(embed.title.slice(0, 256));
+    hasContent = true;
   }
+  if (embed.url) copy.setURL(embed.url);
+  if (embed.description) {
+    copy.setDescription(embed.description.slice(0, 4096));
+    hasContent = true;
+  }
+  if (embed.author?.name) {
+    copy.setAuthor({
+      name: embed.author.name.slice(0, 256),
+      url: embed.author.url ?? undefined,
+      iconURL: embed.author.iconURL ?? undefined,
+    });
+    hasContent = true;
+  }
+  if (embed.fields?.length) {
+    copy.addFields(
+      embed.fields.slice(0, 25).map(field => ({
+        name: field.name.slice(0, 256),
+        value: field.value.slice(0, 1024),
+        inline: field.inline,
+      }))
+    );
+    hasContent = true;
+  }
+  if (embed.thumbnail?.url) {
+    copy.setThumbnail(embed.thumbnail.url);
+    hasContent = true;
+  }
+  if (embed.image?.url) {
+    copy.setImage(embed.image.url);
+    hasContent = true;
+  }
+  if (embed.footer?.text) {
+    copy.setFooter({
+      text: embed.footer.text.slice(0, 2048),
+      iconURL: embed.footer.iconURL ?? undefined,
+    });
+    hasContent = true;
+  }
+  if (embed.timestamp) copy.setTimestamp(new Date(embed.timestamp));
 
-  return urls;
+  return hasContent ? copy : null;
 }
 
-function collectMessageText(message) {
-  const parts = [message.content];
+function buildFallbackText(message) {
+  const lines = [];
 
   for (const embed of message.embeds) {
-    parts.push(
-      embed.title,
-      embed.description,
-      embed.url,
-      embed.author?.name,
-      embed.author?.url,
-      embed.footer?.text,
-      embed.image?.url,
-      embed.thumbnail?.url
-    );
+    lines.push(embed.title, embed.description, embed.url);
+  }
 
-    for (const field of embed.fields ?? []) {
-      parts.push(field.name, field.value);
+  for (const row of message.components ?? []) {
+    for (const component of row.components ?? []) {
+      if (component.url) lines.push(component.url);
     }
   }
 
-  parts.push(...collectComponentUrls(message.components));
-
-  for (const attachment of message.attachments.values()) {
-    parts.push(attachment.url);
-  }
-
-  return parts.filter(Boolean).join("\n");
+  return [...new Set(lines.filter(Boolean))].join("\n").slice(0, 2000);
 }
 
-function parseListing(text) {
-  const wasMatch = text.match(
-    /\bWAS\b\s*(?:PRICE)?\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{1,2})?)/i
-  );
-  const nowMatch = text.match(
-    /\bNOW\b\s*(?:PRICE)?\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{1,2})?)/i
-  );
-
-  const links = [...text.matchAll(/https?:\/\/[^\s<>()]+/gi)].map(match =>
-    match[0].replace(/[.,;!?\])}]+$/, "")
-  );
-
-  if (!wasMatch || !nowMatch || links.length === 0) return null;
-
-  const was = Number(wasMatch[1].replaceAll(",", ""));
-  const now = Number(nowMatch[1].replaceAll(",", ""));
-
-  if (!Number.isFinite(was) || !Number.isFinite(now) || was <= 0 || now < 0) {
-    return null;
-  }
-
-  return {
-    was,
-    now,
-    links: [...new Set(links)],
-    savings: was - now,
-    discountPercent: Math.round(((was - now) / was) * 100),
-  };
-}
-
-function formatListing(listing) {
-  const priceLine = `~~$${listing.was.toFixed(2)}~~ → **$${listing.now.toFixed(2)}**`;
-  const savingsLine = listing.savings >= 0
-    ? `**${listing.discountPercent}% off** · Save $${listing.savings.toFixed(2)}`
-    : "";
-  const linkLines = listing.links
-    .slice(0, 5)
-    .map((url, index) =>
-      listing.links.length === 1
-        ? `[View deal](${url})`
-        : `[Deal link ${index + 1}](${url})`
-    );
-
-  return [priceLine, savingsLine, "", ...linkLines].filter(Boolean).join("\n");
-}
-
-client.once("ready", readyClient => {
+client.once(Events.ClientReady, readyClient => {
   console.log(`Logged in as ${readyClient.user.tag}`);
   console.log(`Watching source channel: ${SOURCE_CHANNEL_ID}`);
   console.log(`Posting to destination channel: ${DESTINATION_CHANNEL_ID}`);
-
-  if (!SOURCE_AUTHOR_ID) {
-    console.log(
-      "SOURCE_AUTHOR_ID is not set. The first source message will print its author ID."
-    );
-  }
+  console.log(
+    SOURCE_AUTHOR_ID
+      ? `Filtering source author: ${SOURCE_AUTHOR_ID}`
+      : "SOURCE_AUTHOR_ID is blank; accepting every message in the intake channel."
+  );
 });
 
-client.on("messageCreate", async message => {
+client.on(Events.MessageCreate, async message => {
   if (message.channelId !== SOURCE_CHANNEL_ID) return;
   if (message.author.id === client.user.id) return;
-
-  console.log(
-    `Source message from ${message.author.tag} | author ID: ${message.author.id}` +
-      (message.webhookId ? ` | webhook ID: ${message.webhookId}` : "")
-  );
-
   if (SOURCE_AUTHOR_ID && message.author.id !== SOURCE_AUTHOR_ID) return;
 
-  const listing = parseListing(collectMessageText(message));
-
-  if (!listing) {
-    console.log("Skipped: could not find WAS, NOW, and a link in that message.");
-    return;
-  }
+  console.log(
+    `Received source message ${message.id} from ${message.author.tag}` +
+      (message.webhookId ? ` via webhook ${message.webhookId}` : "")
+  );
 
   try {
     const destination = await client.channels.fetch(DESTINATION_CHANNEL_ID);
@@ -150,18 +127,41 @@ client.on("messageCreate", async message => {
       throw new Error("The destination channel is not a sendable text channel.");
     }
 
+    const embeds = message.embeds
+      .slice(0, 10)
+      .map(copyEmbed)
+      .filter(Boolean);
+
+    const files = [...message.attachments.values()].slice(0, 10).map(file => ({
+      attachment: file.url,
+      name: file.name ?? `attachment-${file.id}`,
+      description: file.description ?? undefined,
+    }));
+
+    let content = message.content?.trim() ?? "";
+    if (!content && embeds.length === 0 && files.length === 0) {
+      content = buildFallbackText(message);
+    }
+
+    if (!content && embeds.length === 0 && files.length === 0) {
+      console.log(`Skipped empty source message ${message.id}.`);
+      return;
+    }
+
     await destination.send({
-      content: formatListing(listing),
+      content: content || undefined,
+      embeds,
+      files,
       allowedMentions: { parse: [] },
     });
 
-    console.log("Forwarded listing successfully.");
+    console.log(`Forwarded source message ${message.id} successfully.`);
   } catch (error) {
-    console.error("Could not forward listing:", error);
+    console.error(`Could not forward source message ${message.id}:`, error);
   }
 });
 
-client.on("error", error => {
+client.on(Events.Error, error => {
   console.error("Discord client error:", error);
 });
 
