@@ -31,18 +31,35 @@ const client = new Client({
   ],
 });
 
+const LITE_SERVER_DISCLAIMER =
+  /Deals in Lite Server are delayed,\s*join now for Price Errors,\s*Glitches,\s*and Deals in real time/gi;
+
+function stripDisclaimer(text) {
+  if (!text) return "";
+
+  const cleaned = text.replace(LITE_SERVER_DISCLAIMER, "");
+  if (cleaned === text) return text;
+
+  return cleaned
+    .replace(/^[\s\-–—|:]+|[\s\-–—|:]+$/g, "")
+    .trim();
+}
+
 function copyEmbed(embed) {
   const copy = new EmbedBuilder();
   let hasContent = false;
 
+  const title = stripDisclaimer(embed.title);
+  const description = stripDisclaimer(embed.description);
+
   if (embed.color !== null) copy.setColor(embed.color);
-  if (embed.title) {
-    copy.setTitle(embed.title.slice(0, 256));
+  if (title) {
+    copy.setTitle(title.slice(0, 256));
     hasContent = true;
   }
   if (embed.url) copy.setURL(embed.url);
-  if (embed.description) {
-    copy.setDescription(embed.description.slice(0, 4096));
+  if (description) {
+    copy.setDescription(description.slice(0, 4096));
     hasContent = true;
   }
   if (embed.author?.name) {
@@ -87,7 +104,11 @@ function buildFallbackText(message) {
   const lines = [];
 
   for (const embed of message.embeds) {
-    lines.push(embed.title, embed.description, embed.url);
+    lines.push(
+      stripDisclaimer(embed.title),
+      stripDisclaimer(embed.description),
+      embed.url
+    );
   }
 
   for (const row of message.components ?? []) {
@@ -138,7 +159,7 @@ client.on(Events.MessageCreate, async message => {
       description: file.description ?? undefined,
     }));
 
-    let content = message.content?.trim() ?? "";
+    let content = stripDisclaimer(message.content);
     if (!content && embeds.length === 0 && files.length === 0) {
       content = buildFallbackText(message);
     }
@@ -166,3 +187,4 @@ client.on(Events.Error, error => {
 });
 
 client.login(DISCORD_TOKEN);
+
