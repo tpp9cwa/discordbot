@@ -1,3 +1,4 @@
+
 require("dotenv").config();
 
 const {
@@ -9,19 +10,28 @@ const {
 
 function envValue(name, { optional = false } = {}) {
   const value = process.env[name]?.trim();
-
   if (!value || value.startsWith("paste_")) {
     if (optional) return null;
     throw new Error(`Set ${name} in your environment variables.`);
   }
-
   return value;
 }
 
 const DISCORD_TOKEN = envValue("DISCORD_TOKEN");
 const SOURCE_CHANNEL_ID = envValue("SOURCE_CHANNEL_ID");
 const DESTINATION_CHANNEL_ID = envValue("DESTINATION_CHANNEL_ID");
+const FREE_DESTINATION_CHANNEL_ID = envValue("FREE_DESTINATION_CHANNEL_ID");
 const SOURCE_AUTHOR_ID = envValue("SOURCE_AUTHOR_ID", { optional: true });
+
+if (new Set([
+  SOURCE_CHANNEL_ID,
+  DESTINATION_CHANNEL_ID,
+  FREE_DESTINATION_CHANNEL_ID,
+]).size !== 3) {
+  throw new Error(
+    "Source, paid destination, and free destination must have different channel IDs."
+  );
+}
 
 const client = new Client({
   intents: [
@@ -38,6 +48,7 @@ function stripDisclaimer(text) {
   if (!text) return "";
 
   const cleaned = text.replace(LITE_SERVER_DISCLAIMER, "");
+
   if (cleaned === text) return text;
 
   return cleaned
@@ -53,49 +64,67 @@ function copyEmbed(embed) {
   const description = stripDisclaimer(embed.description);
 
   if (embed.color !== null) copy.setColor(embed.color);
+
   if (title) {
     copy.setTitle(title.slice(0, 256));
     hasContent = true;
   }
+
   if (embed.url) copy.setURL(embed.url);
+
   if (description) {
     copy.setDescription(description.slice(0, 4096));
     hasContent = true;
   }
+
   if (embed.author?.name) {
     copy.setAuthor({
-      name: embed.author.name.slice(0, 256),
+      name: stripDisclaimer(embed.author.name).slice(0, 256) || "Deal",
       url: embed.author.url ?? undefined,
       iconURL: embed.author.iconURL ?? undefined,
     });
     hasContent = true;
   }
-  if (embed.fields?.length) {
-    copy.addFields(
-      embed.fields.slice(0, 25).map(field => ({
-        name: field.name.slice(0, 256),
-        value: field.value.slice(0, 1024),
-        inline: field.inline,
-      }))
-    );
+
+  const fields = (embed.fields ?? [])
+    .slice(0, 25)
+    .map(field => ({
+      name: stripDisclaimer(field.name).slice(0, 256) || "Details",
+      value: stripDisclaimer(field.value).slice(0, 1024) || "—",
+      inline: field.inline,
+    }))
+    .filter(field => field.name && field.value);
+
+  if (fields.length) {
+    copy.addFields(fields);
     hasContent = true;
   }
+
   if (embed.thumbnail?.url) {
     copy.setThumbnail(embed.thumbnail.url);
     hasContent = true;
   }
+
   if (embed.image?.url) {
     copy.setImage(embed.image.url);
     hasContent = true;
   }
+
   if (embed.footer?.text) {
-    copy.setFooter({
-      text: embed.footer.text.slice(0, 2048),
-      iconURL: embed.footer.iconURL ?? undefined,
-    });
-    hasContent = true;
+    const footer = stripDisclaimer(embed.footer.text);
+
+    if (footer) {
+      copy.setFooter({
+        text: footer.slice(0, 2048),
+        iconURL: embed.footer.iconURL ?? undefined,
+      });
+      hasContent = true;
+    }
   }
-  if (embed.timestamp) copy.setTimestamp(new Date(embed.timestamp));
+
+  if (embed.timestamp) {
+    copy.setTimestamp(new Date(embed.timestamp));
+  }
 
   return hasContent ? copy : null;
 }
@@ -117,13 +146,38 @@ function buildFallbackText(message) {
     }
   }
 
-  return [...new Set(lines.filter(Boolean))].join("\n").slice(0, 2000);
+  return [...new Set(lines.filter(Boolean))]
+    .join("\n")
+    .slice(0, 2000);
+}
+
+async function forwardTo(channelId, payload, messageId) {
+  try {
+    const destination = await client.channels.fetch(channelId);
+
+    if (!destination?.isTextBased() || !destination.isSendable()) {
+      throw new Error("Channel is not a sendable text channel.");
+    }
+
+    await destination.send(payload);
+
+    console.log(`Forwarded ${messageId} to ${channelId}.`);
+  } catch (error) {
+    console.error(
+      `Could not forward ${messageId} to ${channelId}:`,
+      error
+    );
+  }
 }
 
 client.once(Events.ClientReady, readyClient => {
   console.log(`Logged in as ${readyClient.user.tag}`);
   console.log(`Watching source channel: ${SOURCE_CHANNEL_ID}`);
-  console.log(`Posting to destination channel: ${DESTINATION_CHANNEL_ID}`);
+  console.log(`Paid destination: ${DESTINATION_CHANNEL_ID}`);
+  console.log(
+    `Free destination (deals-aw-yea): ${FREE_DESTINATION_CHANNEL_ID}`
+  );
+
   console.log(
     SOURCE_AUTHOR_ID
       ? `Filtering source author: ${SOURCE_AUTHOR_ID}`
@@ -142,24 +196,21 @@ client.on(Events.MessageCreate, async message => {
   );
 
   try {
-    const destination = await client.channels.fetch(DESTINATION_CHANNEL_ID);
-
-    if (!destination?.isTextBased() || !destination.isSendable()) {
-      throw new Error("The destination channel is not a sendable text channel.");
-    }
-
     const embeds = message.embeds
       .slice(0, 10)
       .map(copyEmbed)
       .filter(Boolean);
 
-    const files = [...message.attachments.values()].slice(0, 10).map(file => ({
-      attachment: file.url,
-      name: file.name ?? `attachment-${file.id}`,
-      description: file.description ?? undefined,
-    }));
+    const files = [...message.attachments.values()]
+      .slice(0, 10)
+      .map(file => ({
+        attachment: file.url,
+        name: file.name ?? `attachment-${file.id}`,
+        description: file.description ?? undefined,
+      }));
 
     let content = stripDisclaimer(message.content);
+
     if (!content && embeds.length === 0 && files.length === 0) {
       content = buildFallbackText(message);
     }
@@ -169,16 +220,23 @@ client.on(Events.MessageCreate, async message => {
       return;
     }
 
-    await destination.send({
-      content: content || undefined,
+    const payload = {
+      content: content ? content.slice(0, 2000) : undefined,
       embeds,
       files,
       allowedMentions: { parse: [] },
-    });
+    };
 
-    console.log(`Forwarded source message ${message.id} successfully.`);
+    await Promise.all([
+      forwardTo(DESTINATION_CHANNEL_ID, payload, message.id),
+      forwardTo(FREE_DESTINATION_CHANNEL_ID, payload, message.id),
+    ]);
+
   } catch (error) {
-    console.error(`Could not forward source message ${message.id}:`, error);
+    console.error(
+      `Could not process source message ${message.id}:`,
+      error
+    );
   }
 });
 
@@ -187,4 +245,3 @@ client.on(Events.Error, error => {
 });
 
 client.login(DISCORD_TOKEN);
-
